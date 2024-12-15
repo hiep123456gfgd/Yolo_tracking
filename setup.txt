@@ -1,0 +1,7 @@
+torch
+utils
+imutils
+Pillow
+deep-sort-realtime
+yt-dlp
+confluent-kafka
