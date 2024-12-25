@@ -9,11 +9,43 @@ from yt_dlp import YoutubeDL
 from confluent_kafka import Producer
 import base64
 import json
+from dotenv import load_dotenv
+from datetime import datetime
+import cloudinary
+import cloudinary.uploader
 
-# Danh sách URL YouTube và ROI tương ứng
+load_dotenv()
+
 video_configs = [
-    {"url": "https://youtu.be/Fu3nDsqC1J0", "roi": [[0, 360], [200, 360], [410, 120], [140, 120], [0, 150]], "image" : "image1","address" : "CameraNguyenHueameraNguyenHue"},
-    {"url": "https://youtu.be/IXBTD4VgFF4", "roi": [[300, 360],[640, 360], [640, 190], [380, 124], [110, 124]] , "image" : "image2","address" : "CameraBenhVienCCameraBenhVienC"},
+    {
+        "camera_id": "676bfabbedf62fc4a83b5027",
+        "url": "https://youtu.be/Fu3nDsqC1J0",
+        "roi": [
+            [0, 360],
+            [200, 360],
+            [410, 120],
+            [140, 120],
+            [0, 150]
+        ],
+        "image": "image1",
+        "latitude": 16.074108898317647,
+        "longitude":108.215779060517,
+        
+    },
+    {
+        "camera_id": "676bfabcedf62fc4a83b5028",
+        "url": "https://youtu.be/IXBTD4VgFF4",
+        "roi": [
+            [300, 360],
+            [640, 360],
+            [640, 190],
+            [380, 124],
+            [110, 124]
+        ],
+        "image": "image2",
+        "latitude": 16.072839621050942,
+        "longitude": 108.21654270831574,
+    }
 ]
 
 # Cấu hình yt-dlp để lấy link stream tốt nhất
@@ -23,10 +55,24 @@ ydl_opts = {
 }
 # Cấu hình Kafka Producer
 kafka_config = {
-    'bootstrap.servers': 'localhost:9092',  # Địa chỉ Kafka broker
-    'client.id': 'image-producer'
+    'bootstrap.servers': os.getenv('BOOTSTRAP_SERVERS'),  # Địa chỉ Kafka broker từ biến môi trường
+    'security.protocol': 'SASL_SSL',                    # Kết nối qua SSL
+    'sasl.mechanism': 'PLAIN',                          # Cơ chế SASL (Plain)
+    'sasl.username': os.getenv('SASL_USERNAME'),        # Tên người dùng SASL
+    'sasl.password': os.getenv('SASL_PASSWORD'),        # Mật khẩu SASL
+    'client.id': 'image-producer'                       # ID client
 }
+
+
+cloudinary.config(
+    cloud_name="dvrisaqgy",
+    api_key="816794745326251",
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")  # Đọc từ biến môi trường
+)
+
+# Khởi tạo Producer
 producer = Producer(kafka_config)
+
 
 def delivery_report(err, msg):
     if err is not None:
@@ -35,24 +81,21 @@ def delivery_report(err, msg):
         print(f"Tin nhắn đã gửi đến {msg.topic()} [{msg.partition()}] với offset {msg.offset()}")
 
 # Hàm gửi ảnh và thông tin address qua Kafka
-def send_image_to_kafka(frame, address, topic="traffic-images"):
-    # Mã hóa ảnh thành chuỗi byte
-    _, buffer = cv2.imencode('.jpg', frame)
-    image_bytes = buffer.tobytes()
-
-      # Mã hóa Base64
-    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-
-    # Tạo thông tin gửi bao gồm ảnh và địa chỉ
+def send_image_to_kafka(frame,conges, video_config, img, topic="python-topic"):
     message = {
-        'address': address,
-        'image': image_base64
+        "camera_id": video_config["camera_id"],
+        "type": "camera report",
+        "typeReport": "TRAFFIC_JAM",
+        "congestionLevel": "HEAVY_CONGESTION",
+        "description": "Traffic Jam in camera",
+        "trafficVolume": conges,
+        "longitude": video_config["longitude"],
+        "latitude": video_config["latitude"],
+        "timestamp": datetime.now().isoformat(),
+        "img": img,
     }
 
-    # Chuyển đổi message thành JSON
     serialized_message = json.dumps(message)
-
-    # Gửi ảnh và thông tin address qua Kafka
     producer.produce(topic, value=serialized_message, callback=delivery_report)
     producer.flush()  # Đảm bảo dữ liệu được gửi ngay lập tức
 
@@ -157,7 +200,7 @@ def process_stream(video_config, stream_id):
             congestion_status = "TRUE"
             status_color = (0, 255, 0)  # Màu xanh lá
 
-            if x_count + y_count / 4 >= 1 :
+            if x_count + y_count / 4 >= 8 :
                 congestion_status = "False"
                 status_color = (0, 0, 255)  # Màu đỏ
 
@@ -169,7 +212,7 @@ def process_stream(video_config, stream_id):
             # Lưu khung hình nếu trạng thái tắc nghẽn
             if congestion_status == "False":
                 # Gửi ảnh và thông tin địa chỉ qua Kafka
-                send_image_to_kafka(frame, video_config["address"], topic="traffic-images22")
+                conges = x_count + y_count
 
                 # Sử dụng thông tin từ video_config để lưu vào thư mục tương ứng
                 image_dir = video_config["image"]
@@ -180,6 +223,25 @@ def process_stream(video_config, stream_id):
                 frame_filename = os.path.join(image_dir, f"stream_{stream_id}_frame_{local_frame_count}.jpg")
                 cv2.imwrite(frame_filename, frame)
                 print(f"Lưu khung hình tại {frame_filename}")
+                # Lưu frame vào Cloudinary
+                try:
+                    _, buffer = cv2.imencode('.jpg', frame)
+                    upload_result = cloudinary.uploader.upload(
+                        buffer.tobytes(),
+                        folder=f"stream_{stream_id}",
+                        public_id=f"frame_{local_frame_count}",
+                        resource_type="image"
+                    )
+                    img_url = upload_result.get("url")
+                    print(f"Uploaded to Cloudinary: {img_url}")
+                except Exception as e:
+                    print(f"Error uploading to Cloudinary: {e}")
+                    img_url = None  # Đặt URL ảnh là None nếu upload thất bại
+
+                # Chỉ gửi thông tin qua Kafka nếu upload thành công
+                if img_url:
+                    send_image_to_kafka(frame, conges, video_config, img_url, topic="python-topic")
+
                 local_frame_count += 1
         frame_count += 1  # Tăng chỉ số frame
             
